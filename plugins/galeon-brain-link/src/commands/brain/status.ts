@@ -42,7 +42,7 @@ export default class BrainStatusCommand {
       // Contracts
       io.log('\nContracts (Monad Mainnet):');
       io.log('  GaleonBrain:  0xE1E61ecdc2C98f22A83E22a9207b43Bf64e63f98');
-      io.log('  GaleonRouter: 0x1cA4DD0ad2CA0fA171277737925B7e0005DC1622');
+      io.log('  GaleonRouter: 0xB7D5aD3ff190B556de41832204530FdA006a85A2');
       io.log('  Fee Receiver: 0xeD4c2576A79D1BB10f9076A69b7Def188A97909A');
       io.log('  Kuru DEX:     0xb3e6778480b2E488385E8205eA05E20060B813cb');
 

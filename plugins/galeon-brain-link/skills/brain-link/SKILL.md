@@ -63,13 +63,19 @@ brain auto-trade --disable
 - `--total-limit`: Total USDC authorized for all trades (default: 10)
 - `--disable`: Revoke auto-trade authorization
 
-**How it works:**
-1. User's wallet approves USDC spending to GaleonRouter smart contract
-2. GaleonRouter enforces on-chain spending limits (per-trade and total)
-3. Brain detects strong signal → pulls USDC from user via contract → swaps on Kuru DEX
-4. 0.5% fee collected on-chain per trade
-5. Brain monitors position: TP1 (+3%) sells 30%, TP2 (+5%) sells 30%, TP3 (+8%) sells rest, SL at -5%
-6. Sale proceeds automatically sent back to user's wallet
+**How it works (uses `wallet-submit` capability):**
+1. Agent sends USDC `approve()` transaction to GaleonRouter via `io.wallet.submitTransaction()`
+2. Agent sends `enableAutoTrade(maxPerTrade, totalLimit, 30)` transaction via `io.wallet.submitTransaction()`
+3. Agent registers wallet with Brain backend API
+4. Brain detects strong signal → calls `pullFundsForTrade()` on GaleonRouter → swaps on Kuru DEX
+5. 0.5% fee collected on-chain per trade
+6. Brain monitors position: TP1 (+3%) sells 30%, TP2 (+5%) sells 30%, TP3 (+8%) sells rest, SL at -5%
+7. Sale proceeds automatically sent back to user's wallet via USDC transfer
+
+**On-chain transactions sent by the agent:**
+- `USDC.approve(GaleonRouter, totalLimit)` — ERC-20 approval
+- `GaleonRouter.enableAutoTrade(maxPerTrade, totalLimit, durationDays)` — On-chain authorization with spending limits
+- `GaleonRouter.revokeAutoTrade()` — When user passes `--disable`
 
 ### `brain positions`
 View all active AI-managed positions with live PnL.
