@@ -47,9 +47,9 @@ brain risk WETH 500
 **Output:** PASS / ADJUST / REJECT verdict with explanation, suggested adjustments if needed.
 
 ### `brain auto-trade`
-Enable or disable AI auto-trading. Brain will automatically execute trades on Kuru DEX when signals are strong.
+Enable agentic AI auto-trading. The Agent Wallet autonomously executes trades on Kuru DEX — no intermediary, no third-party custody. Funds stay in the Agent Wallet at all times.
 
-**When to use:** When the user wants hands-free trading. Brain monitors markets 24/7, enters positions when confidence is high, and exits at take-profit or stop-loss levels.
+**When to use:** When the user wants fully autonomous AI trading. The agent monitors Brain signals and trades directly from the Agent Wallet.
 
 **Example:**
 ```
@@ -61,21 +61,25 @@ brain auto-trade --disable
 **Parameters:**
 - `--max-per-trade`: Maximum USDC per single trade (default: 0.5)
 - `--total-limit`: Total USDC authorized for all trades (default: 10)
-- `--disable`: Revoke auto-trade authorization
+- `--interval`: Scan interval in minutes (default: 15)
+- `--disable`: Stop auto-trading
 
 **How it works (uses `wallet-submit` capability):**
-1. Agent sends USDC `approve()` transaction to GaleonRouter via `io.wallet.submitTransaction()`
-2. Agent sends `enableAutoTrade(maxPerTrade, totalLimit, 30)` transaction via `io.wallet.submitTransaction()`
-3. Agent registers wallet with Brain backend API
-4. Brain detects strong signal → calls `pullFundsForTrade()` on GaleonRouter → swaps on Kuru DEX
-5. 0.5% fee collected on-chain per trade
-6. Brain monitors position: TP1 (+3%) sells 30%, TP2 (+5%) sells 30%, TP3 (+8%) sells rest, SL at -5%
-7. Sale proceeds automatically sent back to user's wallet via USDC transfer
+1. Agent approves USDC to Kuru DEX via `io.wallet.submitTransaction()`
+2. Agent starts a monitoring loop — polls Brain API every N minutes
+3. Brain signal PASSED → Agent gets Kuru swap quote → Agent Wallet signs and sends swap TX directly to Kuru
+4. Agent tracks position in memory — monitors price every 30 seconds
+5. TP1 (+3%) → Agent Wallet sells 30% on Kuru. TP2 (+5%) → sells 30%. TP3 (+8%) → sells rest
+6. SL (-5%) → Agent Wallet sells all on Kuru
+7. All USDC proceeds remain in the Agent Wallet — no third party ever touches the funds
 
-**On-chain transactions sent by the agent:**
-- `USDC.approve(GaleonRouter, totalLimit)` — ERC-20 approval
-- `GaleonRouter.enableAutoTrade(maxPerTrade, totalLimit, durationDays)` — On-chain authorization with spending limits
-- `GaleonRouter.revokeAutoTrade()` — When user passes `--disable`
+**On-chain transactions autonomously sent by the agent:**
+- `USDC.approve(KuruFlow, totalLimit)` — one-time approval for Kuru DEX
+- Kuru swap calldata (buy) — when Brain signal is PASSED
+- `WMON.deposit()` + `WMON.approve(KuruFlow)` — wrap MON before selling
+- Kuru swap calldata (sell) — when TP or SL is hit
+
+**Key principle:** The Agent Wallet is the trader. No Oracle wallet, no intermediary contract for swaps. The agent decides when to trade based on Brain's 12-dimension AI analysis, and the Agent Wallet executes directly on Kuru DEX.
 
 ### `brain positions`
 View all active AI-managed positions with live PnL.
