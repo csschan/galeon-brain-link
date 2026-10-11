@@ -114,6 +114,20 @@ brain status
 - **For auto-trade**, recommend conservative limits for new users: $0.50 per trade, $10 total limit.
 - **Check positions periodically** to keep the user informed about active trades.
 
+## Requirements
+
+- **`@metamask/agent-wallet` v7.1.0+** — Required for Monad (chain-id 143) support. Earlier versions (≤ v6.x) return `UNSUPPORTED_CHAIN` on Monad.
+- **Node.js v22.22.1+** — Required by v7.1.0.
+- **Beast Mode** — Agent Wallet must be initialized with `mm init --wallet server-wallet --mode beast` so auto-trade can sign transactions without user confirmation.
+
+## Verified on Monad Mainnet
+
+Real transaction executed via MetaMask Agent Wallet on Monad:
+- **TX:** `0xf1c4aa49a63bdc78...`
+- **Action:** Bought 20.22 MON @ $0.024729 via Kuru DEX
+- **Agent Wallet:** `0xedab5f1847f60f0e6353f6a804f6a3525b631f98`
+- **Command:** `mm wallet send-transaction --chain-id 143 --payload {...} --wait --json`
+
 ## API Endpoint
 
 The plugin connects to: `https://brainlink.galeon.world/api/brain-link`
