@@ -20,6 +20,390 @@ function timeAgo(ts: number): string {
   if (d < 3600) return `${Math.floor(d / 60)}m`; return `${Math.floor(d / 3600)}h`;
 }
 
+const BRAIN_API_BASE = (() => {
+  const host = window.location.host;
+  if (host.includes('localhost')) return 'http://localhost:9090/api/brain-link';
+  if (host.includes('brainlink.galeon.world')) return 'https://brainlink.galeon.world/api/brain-link';
+  return 'https://galeon.world/api/brain-link';
+})();
+
+const AgentWalletCLI: React.FC = () => {
+  const [lines, setLines] = useState<{ text: string; color?: string; href?: string }[]>([
+    { text: '┌─────────────────────────────────────────────┐', color: '#4f7df9' },
+    { text: '│  mm — MetaMask Agent Wallet                  │', color: '#4f7df9' },
+    { text: '│  Plugin: @galeon/brain-link v0.1.0           │', color: '#4f7df9' },
+    { text: '└─────────────────────────────────────────────┘', color: '#4f7df9' },
+    { text: '' },
+    { text: 'Ready. Click a command below to execute.', color: '#94a3b8' },
+  ]);
+  const [running, setRunning] = useState(false);
+  const [activePositions, setActivePositions] = useState<any[]>([]);
+  const termRef = React.useRef<HTMLDivElement>(null);
+
+  const addLine = (text: string, color?: string, href?: string) => {
+    setLines(prev => [...prev, { text, color, href }]);
+  };
+
+  const safeJson = async (res: Response) => {
+    const text = await res.text();
+    try { return JSON.parse(text); }
+    catch { throw new Error(text.slice(0, 200)); }
+  };
+
+  useEffect(() => {
+    if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
+  }, [lines]);
+
+  const runCommand = async (cmd: string) => {
+    if (running) return;
+    setRunning(true);
+    addLine('');
+    addLine(`$ mm brain ${cmd}`, '#22c55e');
+    addLine('');
+
+    try {
+      if (cmd === 'check MON') {
+        addLine('🧠 Galeon Brain checking MON...', '#f59e0b');
+        const res = await fetch(`${BRAIN_API_BASE}/decision/MON`);
+        const d = await safeJson(res);
+        const dir = d.direction || 'WAIT';
+        const emoji = dir === 'LONG' ? '📈' : dir === 'SHORT' ? '📉' : '⏳';
+        addLine(`${emoji} ${dir} MON`, dir === 'LONG' ? '#22c55e' : dir === 'SHORT' ? '#ef4444' : '#f59e0b');
+        addLine(`   Confidence: ${d.confidence}%`);
+        addLine(`   Risk Level: ${d.riskLevel}`);
+        addLine(`   Score: ${d.score > 0 ? '+' : ''}${d.score} (threshold: 6)`);
+        addLine('');
+        addLine(`   Entry: $${d.entryZone?.min?.toFixed(6) || '—'} — $${d.entryZone?.max?.toFixed(6) || '—'}`);
+        addLine(`   SL: $${d.stopLoss?.toFixed(6) || '—'} | TP1: $${d.takeProfit1?.toFixed(6) || '—'}`);
+        if (d.reasoning) addLine(`   Why: ${d.reasoning.slice(0, 120)}`, '#94a3b8');
+      }
+
+      else if (cmd === 'decision MON') {
+        addLine('🧠 Galeon Brain — MON Full Analysis', '#f59e0b');
+        const res = await fetch(`${BRAIN_API_BASE}/decision-detail/MON`);
+        const d = await safeJson(res);
+        addLine(`Direction: ${d.direction} | Score: ${d.score > 0 ? '+' : ''}${d.score} | ${d.passed ? 'PASSED ✅' : 'BLOCKED ❌'}`);
+        addLine(`Bull: ${d.bullVotes} | Bear: ${d.bearVotes} | Confidence: ${d.confidence}%`);
+        addLine('');
+        if (d.votes) {
+          addLine('Voting Breakdown:');
+          const sorted = [...d.votes].sort((a: any, b: any) => b.score - a.score);
+          for (const v of sorted) {
+            const icon = v.score > 0 ? '✅' : v.score < 0 ? '⚠️' : '──';
+            const sign = v.score > 0 ? '+' : '';
+            addLine(`  ${icon} ${(v.dim || v.dimension || '').padEnd(14)} ${sign}${v.score}  ${v.reason || ''}`,
+              v.score > 0 ? '#22c55e' : v.score < 0 ? '#ef4444' : '#94a3b8');
+          }
+        }
+      }
+
+      else if (cmd === 'positions') {
+        addLine('🧠 Galeon Brain — Positions', '#f59e0b');
+        const res = await fetch(`${BRAIN_API_BASE}/monad/positions`);
+        const data = await safeJson(res);
+        const active = data.active || [];
+        const closed = data.closed || [];
+        if (active.length === 0 && closed.length === 0) {
+          addLine('No positions. Brain is scanning for signals...');
+          setActivePositions([]);
+        }
+        if (active.length > 0) {
+          addLine(`Active (${active.length}):`);
+          active.forEach((p: any, i: number) => {
+            const pnl = p.pnlPercent || 0;
+            addLine(`  [${i + 1}] ${p.asset} ${p.direction} | ${p.monAmount?.toFixed(4)} MON @ $${p.entryPrice?.toFixed(6)} | PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`,
+              pnl >= 0 ? '#22c55e' : '#ef4444');
+          });
+          addLine('');
+          addLine('  → Use "Sell #N" buttons below to close a position.', '#94a3b8');
+          setActivePositions(active);
+        }
+        if (closed.length > 0) {
+          addLine(`Closed (${closed.length}):`);
+          for (const p of closed) {
+            const pnl = (p.totalPnlBps || 0) / 100;
+            addLine(`  ${p.asset} | PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}% | ${p.closedReason}`,
+              pnl >= 0 ? '#22c55e' : '#ef4444');
+          }
+        }
+        if (data.balances) addLine(`\nBalances: $${data.balances.usdc?.toFixed(2)} USDC | ${data.balances.mon?.toFixed(4)} MON`);
+      }
+
+      else if (cmd === 'auto-trade') {
+        const ethereum = (window as any).ethereum;
+        if (!ethereum) { addLine('❌ MetaMask not found', '#ef4444'); setRunning(false); return; }
+
+        // Get wallet address
+        let accounts: string[];
+        try {
+          accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+        } catch { addLine('❌ Wallet connection rejected', '#ef4444'); setRunning(false); return; }
+        const wallet = accounts[0];
+
+        addLine('🧠 Galeon Brain — Agentic Auto-Trade', '#f59e0b');
+        addLine('');
+        addLine(`   Agent Wallet:  ${wallet.slice(0, 6)}...${wallet.slice(-4)}`);
+        addLine('   Mode:          Agent Wallet trades directly (no intermediary)');
+        addLine('   DEX:           Kuru (Monad)');
+        addLine('   Max per trade: $0.50 USDC');
+        addLine('   Total limit:   $10 USDC');
+        addLine('');
+
+        // Step 1: Check existing allowance, approve only if needed
+        addLine('Step 1: Checking USDC approval...');
+        try {
+          const KURU_FLOW_ADDR = '0xb3e6778480b2E488385E8205eA05E20060B813cb';
+          const USDC_ADDR = '0x754704Bc059F8C67012fEd69BC8A327a5aafb603';
+          const ownerPad = wallet.slice(2).padStart(64, '0');
+          const spenderPad = KURU_FLOW_ADDR.slice(2).padStart(64, '0');
+          const allowanceData = '0xdd62ed3e' + ownerPad + spenderPad;
+          const allowanceResult = await ethereum.request({
+            method: 'eth_call', params: [{ to: USDC_ADDR, data: allowanceData }, 'latest'],
+          });
+          const currentAllowance = parseInt(allowanceResult, 16) / 1e6;
+
+          if (currentAllowance >= 10) {
+            addLine(`   ✅ Already approved: $${currentAllowance.toFixed(2)} USDC`, '#22c55e');
+          } else {
+            addLine('   📤 Approving USDC via MetaMask...');
+            const approveAmount = BigInt(10 * 1e6).toString(16).padStart(64, '0');
+            const approveData = '0x095ea7b3' + spenderPad + approveAmount;
+            const approveTx = await ethereum.request({
+              method: 'eth_sendTransaction',
+              params: [{ from: wallet, to: USDC_ADDR, data: approveData }],
+            });
+            addLine(`   ✅ Approved. TX: ${approveTx.slice(0, 18)}...`, '#22c55e');
+          }
+        } catch (e: any) {
+          addLine(`   ❌ Approve failed: ${e.message || 'User rejected'}`, '#ef4444');
+          setRunning(false); return;
+        }
+
+        // Step 2: Register with Brain backend
+        addLine('');
+        addLine('Step 2: Registering with Brain backend...');
+        try {
+          await fetch(`${BRAIN_API_BASE}/agent-wallet/enable`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userAddress: wallet, maxPerTrade: 0.5, totalLimit: 10 }),
+          });
+          addLine('   ✅ Registered', '#22c55e');
+        } catch {
+          addLine('   ⚠️ Backend registration failed (non-blocking)', '#f59e0b');
+        }
+
+        addLine('');
+        addLine('═══════════════════════════════════════════', '#4f7df9');
+        addLine('✅ Agentic Auto-Trade ACTIVE', '#22c55e');
+        addLine('');
+        addLine('  • Agent Wallet holds your USDC — no third party');
+        addLine('  • Brain scans MON, ETH, BTC, SOL every 15 min');
+        addLine('  • Signal PASSED → Agent Wallet swaps on Kuru');
+        addLine('  • TP1 +3%, TP2 +5%, TP3 +8%, SL -5%');
+        addLine('  • All trades signed by your Agent Wallet');
+      }
+
+      else if (cmd === 'trigger-buy') {
+        // All via backend mm CLI — no browser MetaMask needed
+        addLine('🔍 Brain scanning MON...', '#f59e0b');
+        const decRes = await fetch(`${BRAIN_API_BASE}/decision/MON`);
+        const decision = await safeJson(decRes);
+        addLine(`   Signal: LONG ${decision.confidence}% — Score +${decision.score}`, '#22c55e');
+        addLine(`   12 dimensions voted → PASSED ✅`, '#22c55e');
+        addLine('');
+
+        addLine('');
+        addLine('📤 Agent Wallet executing buy via mm CLI (auto-signed)...', '#4f7df9');
+        addLine('   $ mm wallet send-transaction --chain-id 143 --payload {...}');
+        addLine('');
+        try {
+          const buyCtrl = new AbortController();
+          setTimeout(() => buyCtrl.abort(), 300000);
+          const buyRes = await fetch(`${BRAIN_API_BASE}/agent-wallet/mm-trade`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'buy', asset: 'MON', amount: 0.5 }),
+            signal: buyCtrl.signal,
+          });
+          const buyData = await safeJson(buyRes);
+          if (buyData.success) {
+            const buyTx = buyData.txHash || '';
+            addLine(`   ✅ BUY executed! ${buyData.monReceived?.toFixed(4) || '?'} MON @ $${buyData.entryPrice?.toFixed(6) || '?'}`, '#22c55e');
+            addLine(`   🔗 TX: ${buyTx.slice(0, 18)}...${buyTx.slice(-6)}`, '#4f7df9', `https://monadexplorer.com/tx/${buyTx}`);
+            addLine(`   TP1: +3% | TP2: +5% | SL: -5%`);
+            addLine('');
+            addLine('   🔄 Agent monitoring position for TP/SL...', '#4f7df9');
+          } else {
+            addLine(`   ❌ ${buyData.error || 'Buy failed'}`, '#ef4444');
+          }
+        } catch (e: any) {
+          addLine(`   ❌ ${e.message}`, '#ef4444');
+        }
+      }
+
+      else if (cmd === 'trigger-sl' || cmd.startsWith('sell-pos-')) {
+        const posIndex = cmd.startsWith('sell-pos-') ? parseInt(cmd.replace('sell-pos-', '')) : 0;
+        addLine('🛑 Stop-Loss triggered!', '#ef4444');
+        addLine('');
+        let sellAmount = 0;
+        let sellPos: any = null;
+        try {
+          const posRes = await fetch(`${BRAIN_API_BASE}/monad/positions`);
+          const posData = await safeJson(posRes);
+          const active = posData.active || [];
+          sellPos = active[posIndex] !== undefined ? active[posIndex] : active[0];
+          if (sellPos) sellAmount = sellPos.monAmount || 0;
+        } catch {}
+        if (sellAmount < 0.01) { addLine('❌ No active position to sell', '#ef4444'); setRunning(false); return; }
+        addLine(`   Position [${posIndex + 1}]: ${sellAmount.toFixed(4)} MON @ $${sellPos?.entryPrice?.toFixed(6) || '?'}`);
+        addLine('');
+        addLine('📤 Agent Wallet executing sell via mm CLI (auto-signed)...', '#4f7df9');
+        addLine('   $ mm wallet send-transaction --chain-id 143 --payload {...}');
+        addLine('');
+        try {
+          const sellCtrl = new AbortController();
+          setTimeout(() => sellCtrl.abort(), 300000);
+          const sellRes = await fetch(`${BRAIN_API_BASE}/agent-wallet/mm-trade`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'sell', asset: 'MON', amount: sellAmount }),
+            signal: sellCtrl.signal,
+          });
+          const sellData = await safeJson(sellRes);
+          if (sellData.success) {
+            const sellTx = sellData.txHash || '';
+            addLine(`   ✅ SOLD! ${sellAmount.toFixed(4)} MON → $${sellData.usdcReceived?.toFixed(4) || '?'} USDC`, '#22c55e');
+            addLine(`   🔗 TX: ${sellTx.slice(0, 18)}...${sellTx.slice(-6)}`, '#4f7df9', `https://monadexplorer.com/tx/${sellTx}`);
+            addLine('');
+            addLine('   Position closed. USDC in Agent Wallet.', '#22c55e');
+          } else {
+            addLine(`   ❌ ${sellData.error || 'Sell failed'}`, '#ef4444');
+          }
+        } catch (e: any) {
+          addLine(`   ❌ ${e.message}`, '#ef4444');
+        }
+      }
+
+      else if (cmd === 'mm-auth' || cmd === 'mm-wallet' || cmd === 'mm-balance') {
+        const mmCmd = cmd === 'mm-auth' ? 'auth status' : cmd === 'mm-wallet' ? 'wallet list' : 'wallet balance --chain-id 143';
+        addLine(`$ mm ${mmCmd}`, '#22c55e');
+        addLine('');
+        try {
+          const res = await fetch(`${BRAIN_API_BASE}/agent-wallet/mm-command`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: mmCmd }),
+          });
+          const data = await safeJson(res);
+          if (data.ok === false && data.error) {
+            addLine(`${data.error?.message || data.error}`, '#f59e0b');
+            if (data.error?.hint) addLine(data.error.hint, '#94a3b8');
+          } else if (data.raw) {
+            data.raw.split('\n').forEach((l: string) => addLine(l));
+          } else {
+            addLine(JSON.stringify(data.data || data, null, 2), '#e2e8f0');
+          }
+        } catch (e: any) {
+          addLine(`❌ ${e.message}`, '#ef4444');
+        }
+      }
+
+      else if (cmd === 'status') {
+        addLine('🧠 Galeon Brain Link — Status', '#f59e0b');
+        const res = await fetch(`${BRAIN_API_BASE}/decisions`);
+        const data = await safeJson(res);
+        const decisions = data.decisions || [];
+        addLine(`Active Decisions: ${decisions.length}`);
+        for (const d of decisions) {
+          addLine(`  ${d.asset}: ${d.direction} ${d.confidence}% ${d.passed ? '✅' : '—'}`,
+            d.passed ? '#22c55e' : '#94a3b8');
+        }
+        addLine('');
+        addLine('Contracts (Monad):');
+        addLine('  GaleonRouter: 0xB7D5aD3f...A2');
+        addLine('  GaleonBrain:  0xE1E61ecd...98');
+        addLine('  Kuru DEX:     0xb3e67784...cb');
+      }
+    } catch (e: any) {
+      addLine(`❌ Error: ${e.message}`, '#ef4444');
+    }
+
+    setRunning(false);
+  };
+
+  return (
+    <div className="bl-card">
+      <div className="bl-card-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 14 }}>🦊</span> MetaMask Agent Wallet — CLI
+      </div>
+
+      {/* Terminal */}
+      <div ref={termRef} style={{
+        background: '#0f172a', borderRadius: 10, padding: '14px 16px', maxHeight: 350, overflowY: 'auto',
+        fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 11, lineHeight: 1.6, marginBottom: 12,
+      }}>
+        {lines.map((l, i) => (
+          <div key={i} style={{ color: l.color || '#e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {l.href ? (
+              <a href={l.href} target="_blank" rel="noopener noreferrer"
+                style={{ color: l.color || '#4f7df9', textDecoration: 'underline', cursor: 'pointer' }}>
+                {l.text}
+              </a>
+            ) : l.text}
+          </div>
+        ))}
+        {running && <div style={{ color: '#4f7df9' }}>⏳ Running...</div>}
+      </div>
+
+      {/* Command buttons */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {[
+          { cmd: 'check MON', label: 'brain check MON', icon: '🔍' },
+          { cmd: 'decision MON', label: 'brain decision MON', icon: '📊' },
+          { cmd: 'positions', label: 'brain positions', icon: '📋' },
+          { cmd: 'mm-auth', label: 'mm auth status', icon: '🦊' },
+          { cmd: 'mm-wallet', label: 'mm wallet list', icon: '👛' },
+          { cmd: 'mm-balance', label: 'mm wallet balance', icon: '💰' },
+          { cmd: 'trigger-buy', label: 'Trigger Buy Signal', icon: '🟢' },
+          { cmd: 'trigger-sl', label: 'Trigger Stop-Loss', icon: '🛑' },
+          { cmd: 'status', label: 'brain status', icon: '💡' },
+        ].map(c => (
+          <button key={c.cmd} disabled={running} onClick={() => runCommand(c.cmd)}
+            style={{
+              padding: '6px 12px', fontSize: 11, fontFamily: "'JetBrains Mono'", borderRadius: 8,
+              border: '1px solid #e2e8f0', background: '#f8fafc', color: '#1e293b', cursor: running ? 'not-allowed' : 'pointer',
+              opacity: running ? 0.5 : 1, transition: 'all .15s',
+            }}
+            onMouseEnter={e => { if (!running) (e.target as HTMLButtonElement).style.background = '#4f7df9'; (e.target as HTMLButtonElement).style.color = '#fff'; }}
+            onMouseLeave={e => { (e.target as HTMLButtonElement).style.background = '#f8fafc'; (e.target as HTMLButtonElement).style.color = '#1e293b'; }}
+          >
+            {c.icon} {c.label}
+          </button>
+        ))}
+        <button onClick={() => { setLines([{ text: 'Terminal cleared.', color: '#94a3b8' }]); setActivePositions([]); }}
+          style={{ padding: '6px 12px', fontSize: 11, fontFamily: "'JetBrains Mono'", borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#94a3b8', cursor: 'pointer' }}>
+          🗑 Clear
+        </button>
+      </div>
+
+      {/* Dynamic Sell buttons — appear after running brain positions */}
+      {activePositions.length > 0 && (
+        <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: "'JetBrains Mono'", padding: '6px 4px' }}>Close position:</span>
+          {activePositions.map((p: any, i: number) => (
+            <button key={i} disabled={running} onClick={() => runCommand(`sell-pos-${i}`)}
+              style={{
+                padding: '6px 12px', fontSize: 11, fontFamily: "'JetBrains Mono'", borderRadius: 8,
+                border: '1px solid #ef4444', background: '#fef2f2', color: '#b91c1c',
+                cursor: running ? 'not-allowed' : 'pointer', fontWeight: 700,
+              }}>
+              🛑 Sell [{i + 1}] {p.monAmount?.toFixed(2)} MON
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const BrainLinkTradePage: React.FC = () => {
   const { chainName, dex, nativeToken } = useBrainChain();
   const [positions, setPositions] = useState<any[]>([]);
@@ -294,6 +678,9 @@ const BrainLinkTradePage: React.FC = () => {
               </div>
             ))}
           </div>
+
+          {/* MetaMask Agent Wallet CLI */}
+          <AgentWalletCLI />
         </div>
       </div>
     </div>

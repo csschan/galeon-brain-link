@@ -540,47 +540,60 @@ async function getAssetActivity(req, res) {
 
 async function getMonadPositions(req, res) {
   try {
-    if (global.__monadTrader) {
-      const positions = global.__monadTrader.getPositions();
-      const active = positions.filter(p => p.status === 'HOLDING');
+    const memActive = global.__monadTrader ? global.__monadTrader.getPositions().filter(p => p.status === 'HOLDING') : [];
 
-      // Read closed positions from database (not in memory after restart)
-      let closed = positions.filter(p => p.status === 'CLOSED');
-      try {
-        const dbClosed = await DatabaseService.query(
-          'SELECT * FROM monad_positions WHERE status = ? ORDER BY closed_at DESC LIMIT 50', ['CLOSED']
-        );
-        closed = dbClosed.map(r => ({
-          id: r.position_id, asset: r.asset, direction: r.direction, status: r.status,
-          entryPrice: parseFloat(r.entry_price), monAmount: parseFloat(r.mon_amount),
-          usdcInvested: parseFloat(r.usdc_invested), totalPnlBps: r.total_pnl_bps || 0,
-          closedReason: r.closed_reason, closedAt: r.closed_at,
-        }));
-      } catch (e) { /* table may not exist */ }
+    // Always read HOLDING from DB — covers positions opened by mm-trade (not in __monadTrader memory)
+    let active = [...memActive];
+    let closed = [];
+    try {
+      const dbHolding = await DatabaseService.query(
+        'SELECT * FROM monad_positions WHERE status = ? ORDER BY opened_at DESC LIMIT 20', ['HOLDING']
+      );
+      const dbHoldingMapped = dbHolding.map(r => ({
+        id: r.position_id, asset: r.asset, direction: r.direction, status: r.status,
+        entryPrice: parseFloat(r.entry_price), monAmount: parseFloat(r.mon_amount),
+        usdcInvested: parseFloat(r.usdc_invested),
+        tp1Price: parseFloat(r.tp1_price), slPrice: parseFloat(r.sl_price),
+        tp1Hit: !!r.tp1_hit, entryTxHash: r.entry_tx_hash, openedAt: r.opened_at,
+      }));
+      // Merge: DB positions not already tracked in memory
+      const memIds = new Set(memActive.map(p => String(p.id)));
+      for (const p of dbHoldingMapped) {
+        if (!memIds.has(String(p.id))) active.push(p);
+      }
 
-      // Get current price
-      let currentPrice = null;
-      try {
-        const KuruSwapService = require('../services/autoTrade/KuruSwapService');
-        currentPrice = await KuruSwapService.getMONPrice();
-      } catch (e) { /* non-blocking */ }
+      const dbClosed = await DatabaseService.query(
+        'SELECT * FROM monad_positions WHERE status = ? ORDER BY closed_at DESC LIMIT 50', ['CLOSED']
+      );
+      closed = dbClosed.map(r => ({
+        id: r.position_id, asset: r.asset, direction: r.direction, status: r.status,
+        entryPrice: parseFloat(r.entry_price), monAmount: parseFloat(r.mon_amount),
+        usdcInvested: parseFloat(r.usdc_invested), totalPnlBps: r.total_pnl_bps || 0,
+        closedReason: r.closed_reason, closedAt: r.closed_at,
+      }));
+    } catch (e) { /* table may not exist */ }
 
-      // Calculate live PnL for active positions
-      const activeWithPnl = active.map(p => {
-        const pnlPercent = currentPrice ? ((currentPrice - p.entryPrice) / p.entryPrice) * 100 : 0;
-        return { ...p, currentPrice, pnlPercent: parseFloat(pnlPercent.toFixed(2)) };
-      });
+    // Get current price
+    let currentPrice = null;
+    try {
+      const KuruSwapService = require('../services/autoTrade/KuruSwapService');
+      currentPrice = await KuruSwapService.getMONPrice();
+    } catch (e) { /* non-blocking */ }
 
-      // Get balances
-      let balances = { usdc: 0, mon: 0 };
-      try {
-        const KuruSwapService = require('../services/autoTrade/KuruSwapService');
-        balances = await KuruSwapService.getBalances();
-      } catch (e) { /* non-blocking */ }
+    // Calculate live PnL for active positions
+    const activeWithPnl = active.map(p => {
+      const pnlPercent = currentPrice ? ((currentPrice - p.entryPrice) / p.entryPrice) * 100 : 0;
+      return { ...p, currentPrice, pnlPercent: parseFloat(pnlPercent.toFixed(2)) };
+    });
 
-      return res.json({ active: activeWithPnl, closed, balances, currentPrice });
-    }
-    res.json({ active: [], closed: [], balances: { usdc: 0, mon: 0 }, currentPrice: null });
+    // Get balances
+    let balances = { usdc: 0, mon: 0 };
+    try {
+      const KuruSwapService = require('../services/autoTrade/KuruSwapService');
+      balances = await KuruSwapService.getBalances();
+    } catch (e) { /* non-blocking */ }
+
+    return res.json({ active: activeWithPnl, closed, balances, currentPrice });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -961,4 +974,271 @@ module.exports = {
   getAgentWallet,
   enableAgentAutoTrade,
   withdrawAgentWallet,
+  registerAgentPosition,
+  executeAgentSell,
+  executeMmCommand,
+  executeMmTrade,
 };
+
+async function executeMmCommand(req, res) {
+  try {
+    const { command } = req.body;
+    if (!command) return res.status(400).json({ error: 'command required' });
+
+    // Whitelist safe mm commands
+    const allowed = ['auth status', 'wallet list', 'wallet balance', 'wallet show',
+      'swap quote', 'swap execute', 'swap status', 'wallet create', 'transfer'];
+    const cmdBase = command.replace(/\s+--.*$/, '').trim();
+    if (!allowed.some(a => cmdBase.startsWith(a))) {
+      return res.json({ ok: false, error: 'Command not allowed: ' + cmdBase });
+    }
+
+    const { execSync } = require('child_process');
+    const output = execSync(`mm ${command} 2>&1`, {
+      timeout: 30000,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: process.env.PATH + ':/usr/local/bin' },
+    });
+
+    let parsed;
+    try { parsed = JSON.parse(output.replace(/^\(node:.*\n/gm, '')); } catch { parsed = { raw: output }; }
+    res.json(parsed);
+  } catch (error) {
+    res.json({ ok: false, error: error.message?.slice(0, 200) || 'Command failed' });
+  }
+}
+
+async function registerAgentPosition(req, res) {
+  try {
+    const { wallet, asset, direction, entryPrice, monAmount, usdcInvested, txHash } = req.body;
+    if (!wallet || !asset) return res.status(400).json({ error: 'wallet and asset required' });
+
+    const tp1 = entryPrice * 1.03;
+    const tp2 = entryPrice * 1.05;
+    const tp3 = entryPrice * 1.08;
+    const sl = entryPrice * 0.95;
+    const posId = Date.now() % 100000;
+
+    await DatabaseService.query(
+      `INSERT INTO monad_positions (position_id, asset, direction, status, entry_price, mon_amount, usdc_invested,
+         tp1_price, tp2_price, tp3_price, sl_price, tp1_hit, tp2_hit, dca_step, dca_max_steps, entry_tx_hash, opened_at, updated_at)
+       VALUES (?, ?, ?, 'HOLDING', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 2, ?, NOW(), NOW())`,
+      [posId, asset, direction || 'LONG', entryPrice, monAmount, usdcInvested, tp1, tp2, tp3, sl, txHash || '']
+    );
+
+    // Also add to in-memory MonadAutoTradeService if running
+    if (global.__monadTrader) {
+      global.__monadTrader.positions.set(posId, {
+        id: posId, asset, direction: direction || 'LONG', status: 'HOLDING',
+        trader: wallet, entryPrice, monAmount, usdcInvested,
+        tp1Price: tp1, tp2Price: tp2, tp3Price: tp3, slPrice: sl,
+        tp1Hit: false, tp2Hit: false, dcaStep: 0, dcaMaxSteps: 2,
+        entryTxHash: txHash, openedAt: Date.now(),
+      });
+    }
+
+    addActivity('trade_open', asset, `Agent Wallet BUY ${monAmount.toFixed(4)} ${asset} @ $${entryPrice.toFixed(6)} via Kuru`);
+    res.json({ success: true, positionId: posId });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+async function executeAgentSell(req, res) {
+  try {
+    const { wallet, asset, amount } = req.body;
+
+    const ethers = require('ethers');
+    const provider = new ethers.JsonRpcProvider('https://rpc.monad.xyz');
+    const oracle = new ethers.Wallet(process.env.MONAD_ORACLE_PRIVATE_KEY, provider);
+
+    let txHash = '', usdcReceived = 0;
+
+    if (amount && amount > 0) {
+      // Sell MON on Kuru via Oracle
+      const oracleMon = parseFloat(ethers.formatEther(await provider.getBalance(oracle.address)));
+      const sellAmt = Math.min(amount, oracleMon - 0.05);
+      if (sellAmt < 0.01) return res.json({ success: false, error: `Oracle has ${oracleMon.toFixed(4)} MON, not enough` });
+
+      const KuruSwap = require('../services/autoTrade/KuruSwapService');
+      KuruSwap.wallet = oracle;
+      const result = await KuruSwap.sellMON(sellAmt);
+      txHash = result.txHash;
+      usdcReceived = result.usdcReceived;
+
+      // Send USDC to user
+      if (wallet && usdcReceived > 0) {
+        const contractsConfig = require('../config/contracts');
+        const usdc = new ethers.Contract(contractsConfig.Monad.USDC, ['function transfer(address,uint256) returns (bool)'], oracle);
+        await (await usdc.transfer(wallet, ethers.parseUnits(usdcReceived.toFixed(6), 6), { gasLimit: 100000 })).wait();
+      }
+    }
+
+    // Close position in DB
+    try {
+      await DatabaseService.query("UPDATE monad_positions SET status='CLOSED', total_pnl_bps=0, closed_reason='AGENT_SL', closed_at=NOW() WHERE status='HOLDING' ORDER BY opened_at DESC LIMIT 1");
+    } catch {}
+    if (global.__monadTrader) {
+      for (const [, pos] of global.__monadTrader.positions) {
+        if (pos.status === 'HOLDING') { pos.status = 'CLOSED'; pos.closedAt = Date.now(); }
+      }
+    }
+
+    addActivity('trade_close', asset || 'MON', `Stop-loss: sold ${(amount||0).toFixed(4)} MON → $${usdcReceived.toFixed(4)} USDC`);
+    res.json({ success: true, txHash, usdcReceived });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+async function executeMmTrade(req, res) {
+  try {
+    const { action, asset, amount } = req.body;
+    const { execSync } = require('child_process');
+    const ethers = require('ethers');
+    const contractsConfig = require('../config/contracts');
+    const USDC = contractsConfig.Monad.USDC;
+    const WMON = contractsConfig.Monad.WMON;
+    const KURU_API = 'https://ws.kuru.io/api';
+    const agentWallet = '0xedab5f1847f60f0e6353f6a804f6a3525b631f98';
+
+    // Select agent wallet first
+    execSync(`mm wallet select --address ${agentWallet} --json 2>/dev/null`, { timeout: 10000, encoding: 'utf8' });
+
+    const toHexValue = (v) => {
+      if (!v || v === '0' || v === 0) return '0x0';
+      if (typeof v === 'string' && v.startsWith('0x')) return v;
+      return '0x' + BigInt(v).toString(16);
+    };
+
+    const mmSendTx = (payload) => {
+      payload.value = toHexValue(payload.value);
+      const fs = require('fs');
+      const tmpFile = `/tmp/mm-tx-${Date.now()}.json`;
+      fs.writeFileSync(tmpFile, JSON.stringify(payload));
+      const { spawnSync } = require('child_process');
+      const payloadContent = fs.readFileSync(tmpFile, 'utf8');
+      const result = spawnSync('mm', [
+        'wallet', 'send-transaction', '--chain-id', '143',
+        '--payload', payloadContent, '--wait', '--json'
+      ], { timeout: 120000, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+      try { fs.unlinkSync(tmpFile); } catch {}
+      // Combine stdout + stderr, find JSON
+      const combined = (result.stdout || '') + (result.stderr || '');
+      const cleanOut = combined.replace(/\(node:\d+\).*\n/g, '').replace(/\(Use `node.*\n/g, '').replace(/Tx submitted:.*\n/g, '');
+      const jsonStart = cleanOut.indexOf('{');
+      if (jsonStart === -1) throw new Error('mm: ' + cleanOut.trim().slice(0, 200));
+      const out = cleanOut;
+      // Find the matching closing brace for the top-level JSON object
+      let depth = 0, jsonEnd = jsonStart;
+      for (let i = jsonStart; i < out.length; i++) {
+        if (out[i] === '{') depth++;
+        else if (out[i] === '}') { depth--; if (depth === 0) { jsonEnd = i + 1; break; } }
+      }
+      return JSON.parse(out.slice(jsonStart, jsonEnd));
+    };
+
+    // Kuru HTTP helper
+    const https = require('https');
+    const httpPost = (url, data, headers = {}) => new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const body = JSON.stringify(data);
+      const r = https.request({ hostname: u.hostname, path: u.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...headers },
+      }, (rs) => { let d = ''; rs.on('data', c => d += c); rs.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(new Error(d)); } }); });
+      r.on('error', reject); r.setTimeout(60000, () => { r.destroy(); reject(new Error('timeout')); });
+      r.write(body); r.end();
+    });
+
+    const jwtRes = await httpPost(KURU_API + '/generate-token', { user_address: agentWallet });
+    if (!jwtRes.token) return res.json({ success: false, error: 'Kuru JWT failed' });
+
+    await new Promise(r => setTimeout(r, 1500));
+
+    if (action === 'buy') {
+      // Approve USDC to Kuru Flow first
+      const KURU_FLOW = contractsConfig.Monad.KuruFlowEntrypoint;
+      const approveAmt = BigInt(Math.floor(amount * 1e6)).toString(16).padStart(64, '0');
+      const spender = KURU_FLOW.slice(2).padStart(64, '0');
+      mmSendTx({ to: USDC, data: '0x095ea7b3' + spender + approveAmt, value: '0x0' });
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Get quote
+      const amountWei = Math.floor(amount * 1e6).toString();
+      const quoteRes = await httpPost(KURU_API + '/quote', {
+        userAddress: agentWallet, tokenIn: USDC, tokenOut: '0x0000000000000000000000000000000000000000',
+        amount: amountWei, slippageTolerance: 500,
+      }, { 'Authorization': 'Bearer ' + jwtRes.token });
+
+      if (quoteRes.status !== 'success') return res.json({ success: false, error: 'Quote: ' + (quoteRes.error || quoteRes.message || 'rate limited') });
+
+      const monReceived = parseFloat(ethers.formatEther(quoteRes.output));
+      const entryPrice = amount / monReceived;
+      const calldata = quoteRes.transaction.calldata.startsWith('0x') ? quoteRes.transaction.calldata : '0x' + quoteRes.transaction.calldata;
+
+      // Execute swap via mm CLI — Agent Wallet auto-signs
+      const txResult = mmSendTx({ to: quoteRes.transaction.to, data: calldata, value: quoteRes.transaction.value || '0x0' });
+      const txHash = txResult?.data?.transactionHash || txResult?.data?.hash || txResult?.data?.pollingId || '';
+
+      try {
+        await DatabaseService.query(
+          `INSERT INTO monad_positions (position_id, asset, direction, status, entry_price, mon_amount, usdc_invested,
+             tp1_price, tp2_price, tp3_price, sl_price, tp1_hit, tp2_hit, dca_step, dca_max_steps, entry_tx_hash, opened_at, updated_at)
+           VALUES (?, 'MON', 'LONG', 'HOLDING', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 2, ?, NOW(), NOW())`,
+          [Date.now() % 100000, entryPrice, monReceived, amount, entryPrice*1.03, entryPrice*1.05, entryPrice*1.08, entryPrice*0.95, txHash]
+        );
+      } catch {}
+
+      addActivity('trade_open', 'MON', `Agent Wallet BUY ${monReceived.toFixed(4)} MON @ $${entryPrice.toFixed(6)} via mm CLI + Kuru`);
+      res.json({ success: true, txHash, monReceived, entryPrice });
+
+    } else if (action === 'sell') {
+      // Wrap MON → WMON
+      const sellWei = BigInt(Math.floor(amount * 1e18));
+      mmSendTx({ to: WMON, data: '0xd0e30db0', value: '0x' + sellWei.toString(16) });
+
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Approve WMON to Kuru Flow
+      const KURU_FLOW = contractsConfig.Monad.KuruFlowEntrypoint;
+      const spender = KURU_FLOW.slice(2).padStart(64, '0');
+      const amt = sellWei.toString(16).padStart(64, '0');
+      mmSendTx({ to: WMON, data: '0x095ea7b3' + spender + amt, value: '0x0' });
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Get sell quote
+      const quoteRes = await httpPost(KURU_API + '/quote', {
+        userAddress: agentWallet, tokenIn: WMON, tokenOut: USDC,
+        amount: sellWei.toString(), slippageTolerance: 500,
+      }, { 'Authorization': 'Bearer ' + jwtRes.token });
+
+      if (quoteRes.status !== 'success') return res.json({ success: false, error: 'Sell quote: ' + (quoteRes.error || 'rate limited') });
+
+      const usdcReceived = parseFloat(ethers.formatUnits(quoteRes.output, 6));
+      const calldata = quoteRes.transaction.calldata.startsWith('0x') ? quoteRes.transaction.calldata : '0x' + quoteRes.transaction.calldata;
+
+      const txResult = mmSendTx({ to: quoteRes.transaction.to, data: calldata, value: quoteRes.transaction.value || '0x0' });
+      const txHash = txResult?.data?.transactionHash || txResult?.data?.hash || txResult?.data?.pollingId || '';
+
+      try {
+        // Calculate PnL: (usdcReceived - usdcInvested) / usdcInvested * 10000 (basis points)
+        const holdingRows = await DatabaseService.query("SELECT usdc_invested FROM monad_positions WHERE status='HOLDING' ORDER BY opened_at DESC LIMIT 1");
+        const usdcInvested = holdingRows.length > 0 ? parseFloat(holdingRows[0].usdc_invested) : amount * 0.025;
+        const pnlBps = usdcInvested > 0 ? Math.round(((usdcReceived - usdcInvested) / usdcInvested) * 10000) : 0;
+        await DatabaseService.query("UPDATE monad_positions SET status='CLOSED', total_pnl_bps=?, closed_reason='AGENT_SL', closed_at=NOW() WHERE status='HOLDING' ORDER BY opened_at DESC LIMIT 1", [pnlBps]);
+      } catch {}
+      if (global.__monadTrader) {
+        for (const [, pos] of global.__monadTrader.positions) {
+          if (pos.status === 'HOLDING') { pos.status = 'CLOSED'; pos.closedAt = Date.now(); }
+        }
+      }
+
+      addActivity('trade_close', 'MON', `Agent Wallet SELL ${amount.toFixed(4)} MON → $${usdcReceived.toFixed(4)} via mm CLI + Kuru`);
+      res.json({ success: true, txHash, usdcReceived });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message?.slice(0, 200) });
+  }
+}
